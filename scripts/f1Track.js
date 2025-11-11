@@ -7,7 +7,7 @@ class F1Track {
         this.bg_image_source = image;
 
         const grassImg = new Image();
-        // grassImg.src = this.bg_image_source;
+        grassImg.src = this.bg_image_source;
 
         // Scale CSV data
         this.trackData = trackData.map(pt => [
@@ -218,7 +218,7 @@ class F1Track {
     drawTrack(blur = 0) {
         const ctx = this.ctx;
         ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        // this.drawBackgroundGrid();
+        this.drawBackgroundGrid();
         const { leftPts, rightPts } = this.getCanvasBoundaries();
 
         ctx.beginPath();
