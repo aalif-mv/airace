@@ -13,6 +13,7 @@ const trackLabel = document.getElementById('trackLabel');
 const genCounter = document.getElementById('genCounter');
 const trainedAI = document.getElementById('trainedAI');
 
+
 TRACK_DATA.forEach(data => {
     const name = data[0];
     const path = `${TRACK_DATA_SOURCE[1]}${name.replace(/\s+/g, '')}.csv`;
