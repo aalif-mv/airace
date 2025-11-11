@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NEAT Racing AI</title>
+<style>
+  body{margin:0;background:#222;color:#fff;font-family:Arial;}
+  canvas{display:block;margin:auto;background:#333;border:2px solid #555;}
+</style>
+</head>
+<body>
+<input type="file" id="csvFile" accept=".csv">
+<canvas id="gameCanvas" width="1200" height="800"></canvas>
+<script src="https://cdn.jsdelivr.net/npm/neataptic@1.4.7/dist/neataptic.js"></script>
+<script>
+const canvas=document.getElementById('gameCanvas');
+const ctx=canvas.getContext('2d');
+let track=null, ai=null;
+
+// --- Utils ---
+function dp2(n){return Math.round((n+Number.EPSILON)*100)/100;}
+function distance(a,b){return Math.hypot(a[0]-b[0],a[1]-b[1]);}
+
+// --- CSV Loader ---
+async function loadCSV(file){
+  return new Promise((res,rej)=>{
+    const reader=new FileReader();
+    reader.onload=e=>{
+      const lines=e.target.result.split('\n').filter(l=>l.trim()!=='');
+      const data=lines.slice(1).map(l=>l.split(',').map(Number));
+      res(data);
+    };
+    reader.onerror=rej;
+    reader.readAsText(file);
+  });
+}
+
+// --- Camera ---
+class Camera{
+  constructor(x=0,y=0,zoom=1){this.x=x;this.y=y;this.zoom=zoom;}
+  worldToCanvas(wx,wy){return [(wx-this.x)*this.zoom+canvas.width/2,(wy-this.y)*this.zoom+canvas.height/2];}
+  centerTo(x,y,t=0.1){this.x+=(x-this.x)*t;this.y+=(y-this.y)*t;}
+}
+
+// --- Track ---
+class F1Track{
+  constructor(data,scaleFactor=20){
+    this.scaleFactor=scaleFactor;
+    this.trackData=data.map(pt=>[dp2(pt[0]*scaleFactor),dp2(pt[1]*scaleFactor),dp2(pt[2]*scaleFactor),dp2(pt[3]*scaleFactor)]);
+    this.camera=new Camera();
+    this.computeBounds(); this.computeBoundaries(); this.generateCheckpoints(50);
+  }
+  computeBounds(){
+    this.minX=Infinity;this.minY=Infinity;this.maxX=-Infinity;this.maxY=-Infinity;
+    this.trackData.forEach(pt=>{
+      const lx=pt[0]-pt[3],rx=pt[0]+pt[2],ly=pt[1]-pt[3],ry=pt[1]+pt[2];
+      this.minX=Math.min(this.minX,lx); this.maxX=Math.max(this.maxX,rx);
+      this.minY=Math.min(this.minY,ly); this.maxY=Math.max(this.maxY,ry);
+    });
+    this.centerX=(this.minX+this.maxX)/2; this.centerY=(this.minY+this.maxY)/2;
+    this.trackScale=1;
+  }
+  computeBoundaries(){
+    this.leftWorld=[]; this.rightWorld=[];
+    for(let i=0;i<this.trackData.length;i++){
+      const pt=this.trackData[i]; const next=this.trackData[(i+1)%this.trackData.length];
+      const angle=Math.atan2(next[1]-pt[1],next[0]-pt[0]);
+      const lx=pt[0]-pt[3]*Math.cos(angle+Math.PI/2);
+      const ly=pt[1]-pt[3]*Math.sin(angle+Math.PI/2);
+      const rx=pt[0]+pt[2]*Math.cos(angle+Math.PI/2);
+      const ry=pt[1]+pt[2]*Math.sin(angle+Math.PI/2);
+      this.leftWorld.push([lx,ly]); this.rightWorld.push([rx,ry]);
+    }
+    this.leftWorld.push(this.leftWorld[0]); this.rightWorld.push(this.rightWorld[0]);
+  }
+  generateCheckpoints(interval=50){
+    this.checkpoints=[]; let acc=0;
+    for(let i=0;i<this.trackData.length;i++){
+      const pt=this.trackData[i]; const next=this.trackData[(i+1)%this.trackData.length];
+      const d=Math.hypot(next[0]-pt[0],next[1]-pt[1]);
+      acc+=d;
+      if(acc>=interval){this.checkpoints.push({x:next[0],y:next[1]}); acc=0;}
+    }
+  }
+  isOnTrack(x,y){
+    const poly=this.leftWorld.concat(this.rightWorld.slice().reverse());
+    let inside=false;
+    for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+      const xi=poly[i][0],yi=poly[i][1],xj=poly[j][0],yj=poly[j][1];
+      if(((yi>y)!=(yj>y))&&(x<(xj-xi)*(y-yi)/(yj-yi+1e-10)+xi))inside=!inside;
+    }
+    return inside;
+  }
+  getBoundarySegments(){
+    const segs=[];
+    for(let i=0;i<this.leftWorld.length-1;i++){
+      segs.push([this.leftWorld[i],this.leftWorld[i+1]]);
+      segs.push([this.rightWorld[i],this.rightWorld[i+1]]);
+    }
+    return segs;
+  }
+  getCanvasBoundaries(){
+    const left=this.leftWorld.map(p=>this.camera.worldToCanvas(...p));
+    const right=this.rightWorld.map(p=>this.camera.worldToCanvas(...p));
+    return {leftPts:left,rightPts:right};
+  }
+  drawTrack(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    const {leftPts,rightPts}=this.getCanvasBoundaries();
+    ctx.beginPath();
+    leftPts.forEach(([x,y],i)=>i===0?ctx.moveTo(x,y):ctx.lineTo(x,y));
+    for(let i=rightPts.length-1;i>=0;i--)ctx.lineTo(...rightPts[i]);
+    ctx.closePath(); ctx.fillStyle='black'; ctx.fill();
+    ctx.strokeStyle='red'; ctx.setLineDash([5,5]);
+    [leftPts,rightPts].forEach(pts=>{ctx.beginPath();pts.forEach(([x,y],i)=>i===0?ctx.moveTo(x,y):ctx.lineTo(x,y));ctx.closePath();ctx.stroke();});
+    ctx.setLineDash([]);
+    // Draw checkpoints
+    ctx.fillStyle='yellow';
+    this.checkpoints.forEach(cp=>{
+      const [cx,cy]=this.camera.worldToCanvas(cp.x,cp.y);
+      ctx.beginPath(); ctx.arc(cx,cy,5,0,2*Math.PI); ctx.fill();
+    });
+  }
+}
+
+// --- Car ---
+class Car{
+  constructor(x,y){
+    this.x=x; this.y=y; this.angle=0; this.speed=0;
+    this.width=40; this.length=80;
+    this.rayCount=5; this.rayLength=200; this.rayFOV=Math.PI/2;
+    this.rays=[]; this.collisions=[];
+    this.currentCheckpoint=0; this.prevDistance=0; this.onTrack=true;
+  }
+  update(dt=1){this.x+=Math.cos(this.angle)*this.speed*dt; this.y+=Math.sin(this.angle)*this.speed*dt; this.computeRays();}
+  computeRays(){
+    this.rays=[];
+    const half=this.rayFOV/2;
+    for(let i=0;i<this.rayCount;i++){
+      const a=this.rayCount===1?0:-half+(i/(this.rayCount-1))*this.rayFOV;
+      const rayAngle=this.angle+a;
+      this.rays.push({start:[this.x,this.y],end:[this.x+Math.cos(rayAngle)*this.rayLength,this.y+Math.sin(rayAngle)*this.rayLength]});
+    }
+  }
+  getIntersection(A,B,C,D){
+    const [Ax,Ay]=A,[Bx,By]=B,[Cx,Cy]=C,[Dx,Dy]=D;
+    const denom=(Dy-Cy)*(Bx-Ax)-(Dx-Cx)*(By-Ay);
+    if(Math.abs(denom)<1e-10)return null;
+    const t=((Dx-Cx)*(Ay-Cy)-(Dy-Cy)*(Ax-Cx))/denom;
+    const u=((Cx-Ax)*(Ay-By)-(Cy-Ay)*(Ax-Bx))/denom;
+    if(t>=0&&t<=1&&u>=0&&u<=1)return {point:[Ax+t*(Bx-Ax),Ay+t*(By-Ay)],offset:t*Math.hypot(Bx-Ax,By-Ay)};
+    return null;
+  }
+  checkRays(track){
+    const segs=track.getBoundarySegments();
+    const newColl=[];
+    for(let ray of this.rays){
+      let closest=null,min=this.rayLength;
+      for(let s of segs){
+        const hit=this.getIntersection(ray.start,ray.end,s[0],s[1]);
+        if(hit&&hit.offset<min){min=hit.offset;closest=hit.point;}
+      }
+      newColl.push(closest?{point:closest,dist:min}:null);
+    }
+    this.collisions=newColl;
+  }
+  updateCheckpoint(track){
+    const cp=track.checkpoints[this.currentCheckpoint];
+    if(!cp)return;
+    const d=Math.hypot(this.x-cp.x,this.y-cp.y);
+    if(d<10){this.currentCheckpoint=(this.currentCheckpoint+1)%track.checkpoints.length;this.prevDistance+=10;}
+    this.onTrack=track.isOnTrack(this.x,this.y);
+  }
+  draw(camera){
+    const [cx,cy]=camera.worldToCanvas(this.x,this.y);
+    const w=this.width*camera.zoom,l=this.length*camera.zoom;
+    ctx.save(); ctx.translate(cx,cy); ctx.rotate(this.angle);
+    ctx.fillStyle='red'; ctx.fillRect(-l/2,-w/2,l,w); ctx.restore();
+  }
+}
+
+// --- NEAT AI ---
+class NEATAI{
+  constructor(track,popsize=5){
+    this.track=track; this.cars=[]; this.neat=new neataptic.Neat(5,2,{popsize});
+    const start=track.trackData[0];
+    for(let g of this.neat.population){const c=new Car(start[0],start[1]);c.brain=g;this.cars.push(c);}
+  }
+  step(){
+    for(let c of this.cars){
+      if(c.onTrack){
+        const inputs=c.rays.map(r=>r.end[0]-c.x).concat(c.rays.map(r=>r.end[1]-c.y)).slice(0,5);
+        const outputs=c.brain.activate(inputs);
+        c.speed+=outputs[0]; c.angle+=outputs[1]*0.1;
+        c.update(); c.updateCheckpoint(this.track); c.checkRays(this.track);
+      }
+    }
+  }
+}
+
+// --- Main ---
+document.getElementById('csvFile').addEventListener('change',async e=>{
+  const file=e.target.files[0]; if(!file) return;
+  const data=await loadCSV(file);
+  track=new F1Track(data);
+  ai=new NEATAI(track,5);
+  track.camera.centerTo(track.centerX,track.centerY,1);
+  requestAnimationFrame(loop);
+});
+
+function loop(){
+  if(!track||!ai)return;
+  track.drawTrack();
+  ai.step();
+  ai.cars.forEach(c=>c.draw(track.camera));
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
