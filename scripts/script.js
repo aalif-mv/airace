@@ -141,7 +141,7 @@ async function initTrack(cvsSource) {
     const scaleFactorGlobal = 20;
     const data = await loadCSV(cvsSource);
 
-    f1track = new F1Track(canvas, data, scaleFactorGlobal, 'images/grass-texture-2x-vintage.png');
+    f1track = new F1Track(canvas, data, scaleFactorGlobal, './images/grass-texture-2x-vintage.png');
     f1track.camera.zoom = 0.8;
 
     const [firstPt, nextPt] = f1track.trackData;
